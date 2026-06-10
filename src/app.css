@@ -2,3 +2,8 @@
 
 @plugin '@tailwindcss/forms';
 @plugin '@tailwindcss/typography';
+
+body {
+	background-color: #ef4444;
+}
+
