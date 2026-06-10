@@ -3,7 +3,44 @@
 @plugin '@tailwindcss/forms';
 @plugin '@tailwindcss/typography';
 
+/* グローバルスタイルとフォントファミリーの設定 */
+:root {
+  --color-primary: #8ede66;
+  --color-bg-dark: #0a0a0a;
+}
+
 body {
-	background-color: #8ede66;
+  font-family: 'Outfit', 'Noto Sans JP', sans-serif;
+  background-color: var(--color-bg-dark);
+  color: #f3f4f6;
+  margin: 0;
+  padding: 0;
+}
+
+/* カスタムユーティリティクラス */
+.text-neon {
+  color: var(--color-primary);
+  text-shadow: 0 0 10px rgba(142, 222, 102, 0.3), 0 0 20px rgba(142, 222, 102, 0.1);
+}
+
+.bg-glass {
+  background-color: rgba(18, 18, 18, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.border-neon {
+  border-color: rgba(142, 222, 102, 0.4);
+  box-shadow: 0 0 15px rgba(142, 222, 102, 0.1);
+}
+
+.bg-neon-gradient {
+  background: linear-gradient(135deg, #8ede66 0%, #22c55e 100%);
+}
+
+/* スムーズなスクロール調整用 */
+html {
+  scroll-behavior: smooth;
 }
 
