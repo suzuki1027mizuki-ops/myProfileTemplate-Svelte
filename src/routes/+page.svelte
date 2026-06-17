@@ -1,391 +1,542 @@
 <script>
 	import { onMount } from 'svelte';
+	import DrawingCanvas from '$lib/game/DrawingCanvas.svelte';
+	import GameEngine from '$lib/game/GameEngine.svelte';
+	import Shop from '$lib/game/Shop.svelte';
+	import { DefaultSpells } from '$lib/game/spells.js';
+	import { GestureTemplates } from '$lib/game/templates.js';
+	import { sound } from '$lib/game/SoundManager.js';
 
-	let y = $state(0);
-	let smoothedY = $state(0);
-	let windowHeight = $state(800);
+	// Svelte 5 Runes for state management
+	let gameState = $state('start'); // 'start', 'playing', 'stage_clear', 'shop', 'game_over'
+	let gold = $state(150); // Starting gold to buy a spell early
+	let score = $state(0);
+	let stage = $state(1);
+	let playerHp = $state(5);
+	let playerMaxHp = $state(5);
+
+	// Spell Inventory
+	let deck = $state([
+		'pyros_blast',   // Triangle
+		'aqua_barrier',  // Circle
+		'storm_bolt',    // V-Shape
+		'aero_slasher',  // Horizontal Line
+		'ray_lance'      // Vertical Line
+	]);
+	let drawPool = $state([]);
+	let activeSpells = $state([]);
+
+	// UI Controls
+	let showTutorial = $state(false);
+	let muted = $state(false);
+	let stageClearSummary = $state({ scoreGained: 0, goldGained: 0 });
+	let triggerSpellFn = $state(null);
+	let lastCastedSpell = $state(null);
+	let castSuccessFlash = $state(false);
+
+	// Helpers
+	function getSvgPath(shapeName) {
+		const pts = GestureTemplates[shapeName];
+		if (!pts || pts.length === 0) return '';
+		return 'M ' + pts.map(p => `${p.x} ${p.y}`).join(' L ');
+	}
+
+	function translateShapeName(shape) {
+		const map = {
+			'Triangle': '▲ 三角形',
+			'Circle': '● 円',
+			'V-Shape': '∨ V字',
+			'Caret': '∧ 山型',
+			'Horizontal Line': '― 横線(➔)',
+			'Vertical Line': '│ 縦線(▲)',
+			'Square': '■ 四角形',
+			'Z-Shape': 'Z Z字',
+			'Heart': '♥ ハート',
+			'Spiral': '🌀 渦巻き'
+		};
+		return map[shape] || shape;
+	}
+
+	function shuffleArray(array) {
+		const arr = [...array];
+		for (let i = arr.length - 1; i > 0; i--) {
+			const j = Math.floor(Math.random() * (i + 1));
+			[arr[i], arr[j]] = [arr[j], arr[i]];
+		}
+		return arr;
+	}
+
+	// Game Control Actions
+	function initGame() {
+		gold = 150;
+		score = 0;
+		stage = 1;
+		playerHp = playerMaxHp;
+		deck = [
+			'pyros_blast',
+			'aqua_barrier',
+			'storm_bolt',
+			'aero_slasher',
+			'ray_lance'
+		];
+		startStage();
+	}
+
+	function startStage() {
+		sound.resume();
+		gameState = 'playing';
+		playerHp = Math.min(playerMaxHp, playerHp); // Carry HP over
+
+		// Build draw pool and select active 4
+		drawPool = shuffleArray(deck);
+		activeSpells = [];
+		for (let i = 0; i < 4; i++) {
+			const id = drawPool.shift();
+			const spell = DefaultSpells.find(s => s.id === id);
+			activeSpells.push(spell);
+		}
+	}
+
+	// Triggered when user draws a valid shape
+	function handleSpellCast(event) {
+		if (gameState !== 'playing') return;
+
+		const { shape, score: matchScore } = event.detail;
+
+		// Find if this shape matches any of our 4 active spells
+		const spellIndex = activeSpells.findIndex(s => s && s.shape === shape);
+
+		if (spellIndex > -1) {
+			const castedSpell = activeSpells[spellIndex];
+			lastCastedSpell = castedSpell;
+
+			// Flash HUD for feedback
+			castSuccessFlash = true;
+			setTimeout(() => { castSuccessFlash = false; }, 250);
+
+			// Trigger projectile in GameEngine
+			if (triggerSpellFn) {
+				triggerSpellFn(castedSpell.id, matchScore);
+			}
+
+			// Cycle Spell Card: Put casted spell back in bottom of pool, draw next from top
+			drawPool.push(castedSpell.id);
+			
+			const nextId = drawPool.shift();
+			const nextSpell = DefaultSpells.find(s => s.id === nextId);
+			activeSpells[spellIndex] = nextSpell;
+		}
+	}
+
+	function handlePlayerHit(event) {
+		playerHp = event.detail.newHp;
+	}
+
+	function handleHeal(event) {
+		playerHp = Math.min(playerMaxHp, playerHp + event.detail.amount);
+	}
+
+	function handleStageClear(data) {
+		stageClearSummary = {
+			scoreGained: data.scoreGained,
+			goldGained: data.goldGained
+		};
+		gold = data.finalGold;
+		score = data.finalScore;
+		gameState = 'stage_clear';
+	}
+
+	function handleGameOver() {
+		gameState = 'game_over';
+	}
+
+	function goToShop() {
+		gameState = 'shop';
+	}
+
+	function leaveShop() {
+		// Minor carry-over healing between stages
+		playerHp = Math.min(playerMaxHp, playerHp + 2);
+		stage++;
+		startStage();
+	}
+
+	function toggleMute() {
+		muted = sound.toggleMute();
+	}
 
 	onMount(() => {
-		windowHeight = window.innerHeight;
-		const handleResize = () => {
-			windowHeight = window.innerHeight;
-		};
-		window.addEventListener('resize', handleResize);
-
-		let frame;
-		const update = () => {
-			// イージングをかけてスクロール追従を滑らかにする
-			smoothedY += (y - smoothedY) * 0.08;
-			frame = requestAnimationFrame(update);
-		};
-		update();
-
-		return () => {
-			window.removeEventListener('resize', handleResize);
-			cancelAnimationFrame(frame);
-		};
+		sound.init();
 	});
-
-	// スクリプト内でスクロールに連動した背景画像の不透明度 (Opacity) とスケール (Scale) を計算
-	// セクションの高さ（windowHeight）を基準に正規化して計算します
-	
-	// 画像1 (コワーキングスペース)
-	// 最初は不透明度 1、スクロールが windowHeight に近づくにつれてフェードアウト
-	const img0Opacity = $derived(
-		smoothedY < windowHeight * 0.5 
-			? 1 
-			: Math.max(0, 1 - (smoothedY - windowHeight * 0.5) / (windowHeight * 0.8))
-	);
-	const img0Scale = $derived(1 + (smoothedY / (windowHeight * 4)));
-
-	// 画像2 (カフェエリア)
-	// スクロールが 0.5 * windowHeight からフェードインし、1.8 * windowHeight からフェードアウト
-	const img1Opacity = $derived(
-		smoothedY < windowHeight * 0.5
-			? 0
-			: smoothedY < windowHeight * 1.2
-				? (smoothedY - windowHeight * 0.5) / (windowHeight * 0.7)
-				: smoothedY < windowHeight * 1.8
-					? 1
-					: Math.max(0, 1 - (smoothedY - windowHeight * 1.8) / (windowHeight * 0.8))
-	);
-	const img1Scale = $derived(1 + (Math.max(0, smoothedY - windowHeight * 0.5) / (windowHeight * 4)));
-
-	// 画像3 (イベントスペース)
-	// スクロールが 1.8 * windowHeight からフェードイン
-	const img2Opacity = $derived(
-		smoothedY < windowHeight * 1.8
-			? 0
-			: Math.min(1, (smoothedY - windowHeight * 1.8) / (windowHeight * 0.7))
-	);
-	const img2Scale = $derived(1 + (Math.max(0, smoothedY - windowHeight * 1.8) / (windowHeight * 4)));
 </script>
 
-<svelte:window bind:scrollY={y} />
+<svelte:head>
+	<title>呪紋弾幕 - SPELLWEAVER DANMAKU</title>
+	<meta name="description" content="PC・タブレット対応。呪文を描いて放つ、新感覚のジェスチャ弾幕シューティングゲーム" />
+</svelte:head>
 
-<!-- シネマティック背景画像 (fixed で背面に固定) -->
-<div class="fixed inset-0 w-full h-full -z-10 overflow-hidden bg-[#050505]">
-	<!-- 背景のオーバーレイ (全体を少し暗くしてテキストを読みやすくし、フューチャリスティックなグラデーションを加える) -->
-	<div class="absolute inset-0 bg-gradient-to-b from-[#050505]/40 via-[#050505]/60 to-[#050505] z-10 pointer-events-none"></div>
-	
-	<!-- 画像0: コワーキング -->
-	<div 
-		class="absolute inset-0 w-full h-full transition-transform duration-75 ease-out"
-		style="opacity: {img0Opacity}; transform: scale({img0Scale});"
-	>
-		<img 
-			src="/coworking_hero.png" 
-			alt="Coworking Space" 
-			class="w-full h-full object-cover filter brightness-90"
-		/>
+<!-- Responsive Landscape Enforcer -->
+<div class="fixed inset-0 z-50 bg-[#050508] flex flex-col items-center justify-center text-center p-6 md:hidden">
+	<div class="w-16 h-16 rounded-2xl border border-dashed border-cyan-400/30 flex items-center justify-center animate-spin mb-4">
+		<svg class="w-8 h-8 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+		</svg>
 	</div>
-
-	<!-- 画像1: カフェエリア -->
-	<div 
-		class="absolute inset-0 w-full h-full transition-transform duration-75 ease-out"
-		style="opacity: {img1Opacity}; transform: scale({img1Scale});"
-	>
-		<img 
-			src="/cafe_area.png" 
-			alt="Cafe Area" 
-			class="w-full h-full object-cover filter brightness-75"
-		/>
-	</div>
-
-	<!-- 画像2: イベントスペース -->
-	<div 
-		class="absolute inset-0 w-full h-full transition-transform duration-75 ease-out"
-		style="opacity: {img2Opacity}; transform: scale({img2Scale});"
-	>
-		<img 
-			src="/event_space.png" 
-			alt="Event Space with Huge Display" 
-			class="w-full h-full object-cover filter brightness-75"
-		/>
-	</div>
+	<p class="text-white font-bold tracking-wide text-sm">画面を横向きにしてください</p>
+	<p class="text-zinc-500 text-xs mt-2 max-w-[240px]">
+		このゲームは左右分割画面デザインのため、ランドスケープ（横長）モードでのプレイに最適化されています。
+	</p>
 </div>
 
-<!-- メインコンテンツ (スクロールで流れる要素) -->
-<div class="relative w-full z-20">
-	<!-- ヘッダーナビゲーション -->
-	<header class="fixed top-0 left-0 w-full bg-glass border-b border-white/5 z-50 backdrop-blur-md">
-		<div class="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-			<div class="flex items-center gap-3">
-				<span class="text-neon font-bold text-2xl tracking-wider font-sans">INNOVATION PARK</span>
-				<span class="text-white/40 text-xs px-2 py-1 border border-white/10 rounded-full">OSAKA IZUMI</span>
-			</div>
-			<nav class="hidden md:flex items-center gap-8 text-sm font-medium tracking-wide text-white/80">
-				<a href="#about" class="hover:text-neon transition-colors">ABOUT</a>
-				<a href="#coworking" class="hover:text-neon transition-colors">COWORKING</a>
-				<a href="#cafe" class="hover:text-neon transition-colors">CAFE</a>
-				<a href="#event" class="hover:text-neon transition-colors">EVENT SPACE</a>
-				<a href="#access" class="hover:text-neon transition-colors">ACCESS & INFO</a>
-			</nav>
-			<a href="#line" class="bg-neon-gradient text-[#050505] hover:shadow-[0_0_20px_rgba(142,222,102,0.4)] px-5 py-2.5 rounded-full text-sm font-bold tracking-wide transition-all">
-				LINE登録で無料利用
-			</a>
-		</div>
-	</header>
+<!-- Main Game Application Layout -->
+<main 
+	class="w-screen h-screen overflow-hidden text-zinc-100 font-sans flex items-center justify-center relative select-none transition-all duration-500"
+	style="background: radial-gradient(circle at center, rgb({5 + Math.round(50 * (1 - playerHp/playerMaxHp))}, 5, {8 + Math.round(5 * (playerHp/playerMaxHp))}) 0%, #050508 100%)"
+>
+	
+	<!-- Background Sparkles -->
+	<div class="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.03),transparent)] pointer-events-none"></div>
 
-	<!-- ヒーローセクション -->
-	<section class="min-h-screen flex flex-col justify-center items-center px-6 text-center pt-20">
-		<div class="max-w-4xl mx-auto space-y-6">
-			<div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs text-white/70 tracking-wider">
-				<span class="w-2 h-2 rounded-full bg-neon-gradient animate-pulse"></span>
-				UNOFFICIAL HOMEPAGE
+	<!-- Sound Mute toggle standard helper -->
+	<button 
+		on:click={toggleMute}
+		class="absolute top-4 right-4 z-40 p-2.5 rounded-xl bg-zinc-900/80 border border-white/10 text-zinc-400 hover:text-white transition-colors flex items-center justify-center"
+	>
+		{#if muted}
+			<!-- Speaker muted -->
+			<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"></path>
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"></path>
+			</svg>
+		{:else}
+			<!-- Speaker active -->
+			<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M12 18.75V5.25L7.75 9.5H4.5v5h3.25L12 18.75z"></path>
+			</svg>
+		{/if}
+	</button>
+
+	{#if gameState === 'start'}
+		<!-- START SCREEN -->
+		<div class="w-full max-w-lg p-8 rounded-3xl bg-zinc-950/80 border border-white/10 shadow-2xl backdrop-blur-md text-center space-y-8 flex flex-col items-center">
+			<div class="space-y-3">
+				<div class="text-xs font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+					Cyber-Magic Shooter
+				</div>
+				<h1 class="text-4xl font-black tracking-wider text-white font-serif bg-gradient-to-r from-emerald-400 via-cyan-400 to-indigo-500 bg-clip-text text-transparent">
+					呪紋弾幕 (スペルウィーバー)
+				</h1>
+				<p class="text-xs text-zinc-500">描いた呪紋で弾幕を打ち砕く、魔導シューティングゲーム</p>
 			</div>
-			<h1 class="text-5xl md:text-7xl lg:text-8xl font-black text-white leading-tight font-sans tracking-tight">
-				イノパでイベント創る、<br class="hidden md:block" />
-				開く、盛り上がる！
-			</h1>
-			<p class="text-lg md:text-xl text-white/70 font-light max-w-2xl mx-auto leading-relaxed">
-				大阪府和泉市・泉中央駅から直結徒歩1分。<br class="hidden sm:block" />
-				コワーキングスペース、カフェ、そして大型ディスプレイを備えた次世代の共創・イベントスペース。
-			</p>
-			<div class="pt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-				<a href="#line" class="w-full sm:w-auto px-8 py-4 bg-neon-gradient text-[#050505] rounded-full font-bold text-base shadow-[0_0_30px_rgba(142,222,102,0.3)] hover:scale-105 transition-all text-center">
-					LINEで友だち追加する
-				</a>
-				<a href="#about" class="w-full sm:w-auto px-8 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full font-medium text-base text-white transition-all text-center">
-					詳細を見る
-				</a>
+
+			<div class="w-full space-y-4">
+				<button 
+					on:click={initGame}
+					class="w-full py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-black font-extrabold rounded-2xl shadow-[0_0_30px_rgba(16,185,129,0.25)] hover:scale-103 active:scale-98 transition-all tracking-widest text-base"
+				>
+					ゲーム開始 (PLAY GAME)
+				</button>
+				<button 
+					on:click={() => { showTutorial = true; }}
+					class="w-full py-3.5 bg-zinc-900 border border-white/10 hover:border-zinc-700 text-zinc-300 font-bold rounded-2xl transition-all"
+				>
+					遊び方 (HOW TO PLAY)
+				</button>
 			</div>
-			<!-- 下スクロールを促すアイコン -->
-			<div class="pt-16 animate-bounce text-white/40 flex flex-col items-center gap-2 text-xs tracking-widest">
-				<span>SCROLL DOWN</span>
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
-				</svg>
+
+			<div class="text-[10px] text-zinc-600">
+				PC: WASD移動 / Shift低速 / マウス描画<br />
+				タブレット: 弾幕ゾーンのドラッグで移動 / 右ゾーンでタッチ描画
 			</div>
 		</div>
-	</section>
 
-	<!-- セクション: イノパについて -->
-	<section id="about" class="min-h-screen flex flex-col justify-center py-24 px-6 bg-[#0a0a0a]/80 backdrop-blur-sm border-t border-white/5">
-		<div class="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
-			<div class="space-y-6">
-				<h2 class="text-sm font-bold tracking-widest text-neon uppercase">ABOUT INNOVATION PARK</h2>
-				<h3 class="text-3xl md:text-5xl font-black text-white leading-tight">
-					コワーキングスペースと<br />カフェが融合したイノベーションの場
-				</h3>
-				<p class="text-white/70 leading-relaxed">
-					INNOVATION PARK OSAKA IZUMI（イノパ）は、単なる作業場所ではありません。地域の人々、クリエイター、起業家が集まり、新たなコラボレーションやアイデアが生まれる「共創のプラットフォーム」です。
-				</p>
-				<p class="text-white/70 leading-relaxed">
-					洗練された木目調のインテリアと豊かなインドアグリーンが調和する空間で、日常のワークスペースとしても、大切なビジネスミーティングの場としても、最高の生産性を提供します。
-				</p>
-			</div>
-			<div class="grid grid-cols-2 gap-4">
-				<div class="p-6 bg-glass rounded-2xl border border-white/5 space-y-3 hover:border-neon/30 transition-all">
-					<div class="text-neon text-3xl font-extrabold">1 <span class="text-sm">min</span></div>
-					<h4 class="text-white font-bold">和泉中央駅 直結</h4>
-					<p class="text-white/50 text-xs">駅からペデストリアンデッキを通り徒歩1〜2分。抜群のアクセス性。</p>
-				</div>
-				<div class="p-6 bg-glass rounded-2xl border border-white/5 space-y-3 hover:border-neon/30 transition-all">
-					<div class="text-neon text-3xl font-extrabold">Free</div>
-					<h4 class="text-white font-bold">LINE登録で無料</h4>
-					<p class="text-white/50 text-xs">公式LINEを友だち追加するだけでコワーキングスペースを無料で利用可能。</p>
-				</div>
-				<div class="p-6 bg-glass rounded-2xl border border-white/5 space-y-3 hover:border-neon/30 transition-all">
-					<div class="text-neon text-3xl font-extrabold">Wi-Fi</div>
-					<h4 class="text-white font-bold">超高速ネット環境</h4>
-					<p class="text-white/50 text-xs">全席に電源を完備し、高速Wi-Fiで快適なビジネスワークをサポート。</p>
-				</div>
-				<div class="p-6 bg-glass rounded-2xl border border-white/5 space-y-3 hover:border-neon/30 transition-all">
-					<div class="text-neon text-3xl font-extrabold">LED</div>
-					<h4 class="text-white font-bold">大型ディスプレイ</h4>
-					<p class="text-white/50 text-xs">プレゼンテーションやイベントの演出に最適な、圧倒的迫力の大型モニター。</p>
+	{:else if gameState === 'playing'}
+		<!-- PLAYING SCREEN -->
+		<div class="w-full h-full flex flex-col md:flex-row p-4 gap-4 box-border">
+			<!-- Left Panel: Danmaku Zone (56% width) -->
+			<div class="w-full md:w-[56%] h-full flex flex-col">
+				<div class="flex-1 min-h-0">
+					<GameEngine 
+						stage={stage}
+						bind:playerHp={playerHp}
+						playerMaxHp={playerMaxHp}
+						bind:gold={gold}
+						bind:score={score}
+						activeSpells={activeSpells}
+						onRegisterTrigger={(fn) => { triggerSpellFn = fn; }}
+						onplayerHit={handlePlayerHit}
+						onheal={handleHeal}
+						onstageClear={handleStageClear}
+						ongameOver={handleGameOver}
+					/>
 				</div>
 			</div>
-		</div>
-	</section>
 
-	<!-- セクション: コワーキングスペース -->
-	<section id="coworking" class="min-h-screen flex flex-col justify-center py-24 px-6 bg-transparent">
-		<div class="max-w-4xl mx-auto space-y-8 text-right lg:text-left">
-			<div class="inline-block px-4 py-1.5 rounded-full bg-[#8ede66]/10 text-neon text-sm font-bold tracking-wider">
-				01. COWORKING SPACE
-			</div>
-			<div class="max-w-2xl bg-glass p-8 md:p-12 rounded-3xl border border-white/10 space-y-6 shadow-2xl">
-				<h3 class="text-3xl md:text-4xl font-extrabold text-white">
-					あらゆるクリエイティブワークを<br class="hidden sm:block" />加速させるスペース
-				</h3>
-				<p class="text-white/70 leading-relaxed text-sm md:text-base">
-					静かに集中できるパーソナルブースから、アイデアを広げるための共有テーブルまで、目的に応じて選べる座席レイアウト。全席に電源を完備し、ストレスフリーでクリエイティブな時間を過ごすことができます。
-				</p>
-				<ul class="space-y-3 text-white/80 text-sm">
-					<li class="flex items-center gap-3">
-						<svg class="w-5 h-5 text-neon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-						</svg>
-						高速かつセキュリティ万全な専用Wi-Fi
-					</li>
-					<li class="flex items-center gap-3">
-						<svg class="w-5 h-5 text-neon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-						</svg>
-						全席にコンセント・充電用USBポートを配置
-					</li>
-					<li class="flex items-center gap-3">
-						<svg class="w-5 h-5 text-neon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-						</svg>
-						打ち合わせや商談に最適なフリーミーティングエリア
-					</li>
-				</ul>
-			</div>
-		</div>
-	</section>
-
-	<!-- セクション: カフェ -->
-	<section id="cafe" class="min-h-screen flex flex-col justify-center py-24 px-6 bg-[#050505]/40">
-		<div class="max-w-4xl mx-auto flex justify-end">
-			<div class="max-w-2xl bg-glass p-8 md:p-12 rounded-3xl border border-white/10 space-y-6 shadow-2xl text-left">
-				<div class="inline-block px-4 py-1.5 rounded-full bg-[#8ede66]/10 text-neon text-sm font-bold tracking-wider mb-2">
-					02. CAFE EXPERIENCE
-				</div>
-				<h3 class="text-3xl md:text-4xl font-extrabold text-white">
-					上質なコーヒーと、憩いのひととき
-				</h3>
-				<p class="text-white/70 leading-relaxed text-sm md:text-base">
-					イノパの魅力は本格的なカフェサービスにもあります。注文を受けてから一杯ずつ丁寧に抽出するエスプレッソやカプチーノは、仕事の合間のリフレッシュに最適です。
-				</p>
-				<p class="text-white/70 leading-relaxed text-sm md:text-base">
-					お仕事のお供としてはもちろん、カフェのみのカジュアルなご利用も大歓迎。心地よいBGMとコーヒーの香りに包まれて、上質なリラックスタイムをお過ごしください。
-				</p>
-				<div class="flex gap-4 pt-2">
-					<div class="text-xs px-3 py-2 bg-white/5 rounded-lg border border-white/5 text-white/60">
-						Espresso & Coffee
-					</div>
-					<div class="text-xs px-3 py-2 bg-white/5 rounded-lg border border-white/5 text-white/60">
-						Soft Drinks
-					</div>
-					<div class="text-xs px-3 py-2 bg-white/5 rounded-lg border border-white/5 text-white/60">
-						Desserts & Snacks
-					</div>
-				</div>
-			</div>
-		</div>
-	</section>
-
-	<!-- セクション: イベントスペース -->
-	<section id="event" class="min-h-screen flex flex-col justify-center py-24 px-6 bg-transparent">
-		<div class="max-w-4xl mx-auto space-y-8">
-			<div class="inline-block px-4 py-1.5 rounded-full bg-[#8ede66]/10 text-neon text-sm font-bold tracking-wider">
-				03. EVENT SPACE & DISPLAY
-			</div>
-			<div class="max-w-2xl bg-glass p-8 md:p-12 rounded-3xl border border-white/10 space-y-6 shadow-2xl">
-				<h3 class="text-3xl md:text-4xl font-extrabold text-white">
-					大型ディスプレイによる、<br class="hidden sm:block" />
-					圧倒的なイベントプレゼンテーション
-				</h3>
-				<p class="text-white/70 leading-relaxed text-sm md:text-base">
-					スペースの前面には、視認性に優れた大型のLEDディスプレイモニターが設置されています。セミナー、新製品発表会、ミートアップ、クリエイティブイベントなど、多様な催し物を華やかに演出します。
-				</p>
-				<p class="text-white/70 leading-relaxed text-sm md:text-base">
-					マイクや音響機材、配信用機材の連携も可能で、ハイブリッド形式のイベントやオンライン配信にも完全に対応。新しいカルチャーやイベントを「創る」「開く」「盛り上げる」最高のプラットフォームです。
-				</p>
-			</div>
-		</div>
-	</section>
-
-	<!-- セクション: LINE登録促進 -->
-	<section id="line" class="py-24 px-6 bg-gradient-to-b from-transparent to-[#0a0a0a] border-t border-white/5">
-		<div class="max-w-4xl mx-auto bg-glass p-8 md:p-16 rounded-3xl border border-neon/30 text-center space-y-8 shadow-[0_0_50px_rgba(142,222,102,0.05)]">
-			<div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#8ede66]/10 text-xs text-neon tracking-wider font-bold">
-				LINE MEMBER EXCLUSIVE
-			</div>
-			<h2 class="text-3xl md:text-5xl font-black text-white leading-tight">
-				公式LINE追加で、<br />
-				コワーキングスペース利用が「無料」に。
-			</h2>
-			<p class="text-white/70 max-w-xl mx-auto text-sm md:text-base leading-relaxed">
-				イノパをもっと身近に。公式LINEアカウントを友だち登録していただくだけで、コワーキングスペースや各種サービスが無料でご利用いただけるようになります。
-			</p>
-			<div class="flex flex-col items-center gap-4 pt-4">
-				<a href="https://line.me" target="_blank" rel="noopener noreferrer" class="px-10 py-5 bg-neon-gradient text-[#050505] rounded-full font-black text-lg shadow-[0_0_30px_rgba(142,222,102,0.4)] hover:scale-105 transition-all">
-					LINE公式アカウントを登録する
-				</a>
-				<span class="text-xs text-white/40">※貸切イベントスペースなどの予約利用には別途料金が発生します。</span>
-			</div>
-		</div>
-	</section>
-
-	<!-- セクション: インフォメーション & アクセス -->
-	<section id="access" class="py-24 px-6 bg-[#0a0a0a] border-t border-white/5">
-		<div class="max-w-5xl mx-auto space-y-16">
-			<div class="text-center space-y-4">
-				<h2 class="text-sm font-bold tracking-widest text-neon uppercase">ACCESS & INFO</h2>
-				<h3 class="text-3xl md:text-4xl font-extrabold text-white">アクセスと施設情報</h3>
-			</div>
-
-			<div class="grid grid-cols-1 lg:grid-cols-2 gap-12">
-				<!-- 左側: 情報 -->
-				<div class="space-y-8">
-					<div class="p-8 bg-glass rounded-2xl border border-white/5 space-y-6">
-						<h4 class="text-xl font-bold text-white tracking-wide border-l-4 border-neon pl-4">施設概要</h4>
-						<dl class="space-y-4 text-sm">
-							<div class="grid grid-cols-3 border-b border-white/5 pb-3">
-								<dt class="text-white/50 font-medium">名称</dt>
-								<dd class="col-span-2 text-white font-semibold">INNOVATION PARK OSAKA IZUMI</dd>
+			<!-- Right Panel: Drawing Zone (44% width) -->
+			<div class="w-full md:w-[44%] flex flex-col gap-3 h-full">
+				<!-- HUD and Stats -->
+				<div class="p-4 rounded-2xl bg-zinc-950/80 border border-white/10 backdrop-blur-md flex justify-between items-center flex-shrink-0">
+					<div class="space-y-1">
+						<div class="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">STAGE {stage}</div>
+						<div class="flex items-center gap-3">
+							<span class="text-rose-400 font-extrabold text-sm tracking-wider">HP</span>
+							<!-- Heart Icons -->
+							<div class="flex gap-1">
+								{#each Array(playerMaxHp) as _, i}
+									<span class="text-3xl leading-none transition-all duration-300 drop-shadow-[0_0_10px_rgba(244,63,94,0.5)]" class:text-rose-500={i < playerHp} class:text-zinc-800={i >= playerHp} class:scale-110={i < playerHp} class:animate-pulse={playerHp <= 2 && i < playerHp}>
+										♥
+									</span>
+								{/each}
 							</div>
-							<div class="grid grid-cols-3 border-b border-white/5 pb-3">
-								<dt class="text-white/50 font-medium">住所</dt>
-								<dd class="col-span-2 text-white">大阪府和泉市いぶき野5丁目1-14 エコール・いずみ東館1階</dd>
-							</div>
-							<div class="grid grid-cols-3 border-b border-white/5 pb-3">
-								<dt class="text-white/50 font-medium">アクセス</dt>
-								<dd class="col-span-2 text-white">泉北高速鉄道「和泉中央」駅 徒歩1〜2分（直結ペデストリアンデッキ経由）</dd>
-							</div>
-							<div class="grid grid-cols-3 border-b border-white/5 pb-3">
-								<dt class="text-white/50 font-medium">営業時間</dt>
-								<dd class="col-span-2 text-white">10:00 〜 20:00</dd>
-							</div>
-							<div class="grid grid-cols-3">
-								<dt class="text-white/50 font-medium">定休日</dt>
-								<dd class="col-span-2 text-white">エコール・いずみの休館日に準じます</dd>
-							</div>
-						</dl>
+							<span class="text-lg font-black font-mono text-rose-400/90 ml-1">
+								{playerHp} / {playerMaxHp}
+							</span>
+						</div>
 					</div>
 
-					<div class="p-8 bg-glass rounded-2xl border border-white/5 space-y-4">
-						<h4 class="text-lg font-bold text-white">ご利用にあたって</h4>
-						<p class="text-xs text-white/50 leading-relaxed">
-							コワーキングスペースおよびカフェはどなたでも自由にご利用いただけます。コワーキングとしての滞在利用は、受付にてLINEの友だち追加画面をご提示ください。
-							会議室や貸切イベントのご予約は、事前に外部予約システムより承っております。詳細はお気軽にお問い合わせください。
+					<div class="text-right space-y-1">
+						<div class="text-xs text-yellow-500 font-bold font-mono">{gold} G</div>
+						<div class="text-xs text-cyan-400 font-extrabold font-mono">SCORE: {score}</div>
+					</div>
+				</div>
+
+				<!-- Usable Active Spells Display (4 queue slots) -->
+				<div 
+					class="p-3 rounded-2xl bg-zinc-950/80 border border-white/10 backdrop-blur-md flex-shrink-0 transition-colors duration-200"
+					class:bg-emerald-950-10={castSuccessFlash}
+					class:border-emerald-500-20={castSuccessFlash}
+				>
+					<div class="text-[9px] font-bold text-zinc-500 uppercase tracking-widest mb-2 px-1">使用可能呪文 (描くお手本)</div>
+					<div class="grid grid-cols-4 gap-2">
+						{#each activeSpells as spell, index}
+							{#if spell}
+								<div 
+									class="flex flex-col items-center p-2 rounded-xl bg-zinc-900/60 border text-center transition-all"
+									style="border-color: {spell.color}35; box-shadow: inset 0 0 8px {spell.color}05"
+								>
+									<span class="text-[9px] text-zinc-400 font-bold truncate max-w-full mb-1">{spell.name}</span>
+									
+									<!-- SVG Shape Preview -->
+									<div class="w-10 h-10 flex items-center justify-center border border-white/5 bg-zinc-950 rounded-lg relative my-1">
+										<svg viewBox="0 0 100 100" class="w-8 h-8">
+											<path 
+												d={getSvgPath(spell.shape)} 
+												fill="none" 
+												stroke={spell.color} 
+												stroke-width="7" 
+												stroke-linecap="round" 
+												stroke-linejoin="round" 
+											/>
+										</svg>
+									</div>
+
+									<span class="text-[8px] font-extrabold px-1 rounded-md bg-zinc-950 mt-1 uppercase" style="color: {spell.color}">
+										{translateShapeName(spell.shape)}
+									</span>
+								</div>
+							{/if}
+						{/each}
+					</div>
+				</div>
+
+				<!-- Casting Drawing Canvas -->
+				<div class="flex-1 min-h-0 relative">
+					<DrawingCanvas on:cast={handleSpellCast} />
+				</div>
+			</div>
+		</div>
+
+	{:else if gameState === 'stage_clear'}
+		<!-- STAGE CLEAR INTERMEDIATE -->
+		<div class="w-full max-w-md p-8 rounded-3xl bg-zinc-950/80 border border-white/10 shadow-2xl backdrop-blur-md text-center space-y-6 flex flex-col items-center">
+			<div class="space-y-2">
+				<div class="text-xs font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+					Stage Cleared
+				</div>
+				<h2 class="text-3xl font-black text-white font-serif tracking-wider">
+					魔獣討伐 完了
+				</h2>
+			</div>
+
+			<!-- Results Summary -->
+			<div class="w-full p-4 rounded-2xl bg-zinc-900/60 border border-white/5 space-y-3 text-sm">
+				<div class="flex justify-between border-b border-white/5 pb-2">
+					<span class="text-zinc-500">獲得スコア:</span>
+					<span class="text-cyan-400 font-extrabold font-mono">+{stageClearSummary.scoreGained}</span>
+				</div>
+				<div class="flex justify-between border-b border-white/5 pb-2">
+					<span class="text-zinc-500">獲得ゴールド:</span>
+					<span class="text-yellow-500 font-extrabold font-mono">+{stageClearSummary.goldGained} G</span>
+				</div>
+				<div class="flex justify-between pt-1">
+					<span class="text-zinc-500">現在の総スコア:</span>
+					<span class="text-white font-extrabold font-mono">{score}</span>
+				</div>
+			</div>
+
+			<button 
+				on:click={goToShop}
+				class="w-full py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-black font-extrabold rounded-2xl shadow-[0_0_30px_rgba(16,185,129,0.2)] hover:scale-102 transition-all tracking-wider text-sm"
+			>
+				魔導書ショップへ進む ➔
+			</button>
+		</div>
+
+	{:else if gameState === 'shop'}
+		<!-- SPELL SHOP -->
+		<Shop 
+			gold={gold} 
+			deck={deck} 
+			stage={stage} 
+			onUpdateGold={(g) => { gold = g; }}
+			onUpdateDeck={(d) => { deck = d; }}
+			onNextStage={leaveShop}
+		/>
+
+	{:else if gameState === 'game_over'}
+		<!-- GAME OVER -->
+		<div class="w-full max-w-md p-8 rounded-3xl bg-zinc-950/80 border border-white/10 shadow-2xl backdrop-blur-md text-center space-y-6 flex flex-col items-center">
+			<div class="space-y-2">
+				<div class="text-xs font-bold text-rose-500 uppercase tracking-widest bg-rose-500/10 px-3 py-1 rounded-full border border-rose-500/20">
+					Defeated
+				</div>
+				<h2 class="text-3xl font-black text-rose-500 font-serif tracking-wider">
+					自機大破 (GAME OVER)
+				</h2>
+			</div>
+
+			<div class="w-full p-4 rounded-2xl bg-zinc-900/60 border border-white/5 space-y-3 text-sm">
+				<div class="flex justify-between border-b border-white/5 pb-2">
+					<span class="text-zinc-500">最終到達ステージ:</span>
+					<span class="text-white font-bold">STAGE {stage}</span>
+				</div>
+				<div class="flex justify-between">
+					<span class="text-zinc-500">最終スコア:</span>
+					<span class="text-cyan-400 font-black font-mono">{score}</span>
+				</div>
+			</div>
+
+			<div class="w-full space-y-3">
+				<button 
+					on:click={initGame}
+					class="w-full py-4 bg-white text-black font-extrabold rounded-2xl shadow-[0_0_30px_rgba(255,255,255,0.15)] hover:scale-102 transition-all text-sm tracking-wider"
+				>
+					もう一度プレイ
+				</button>
+				<button 
+					on:click={() => { gameState = 'start'; }}
+					class="w-full py-3 bg-zinc-900 border border-white/10 text-zinc-400 hover:text-zinc-300 font-bold rounded-2xl transition-all text-sm"
+				>
+					タイトルに戻る
+				</button>
+			</div>
+		</div>
+	{/if}
+
+	<!-- HOW TO PLAY TUTORIAL DIALOG MODAL -->
+	{#if showTutorial}
+		<div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+			<div class="w-full max-w-2xl bg-zinc-950 border border-white/10 rounded-3xl p-6 md:p-8 space-y-6 max-h-[90vh] overflow-y-auto relative">
+				<button 
+					on:click={() => { showTutorial = false; }}
+					class="absolute top-4 right-4 text-zinc-500 hover:text-white text-xl p-1"
+				>
+					✕
+				</button>
+				
+				<div class="border-b border-white/10 pb-3">
+					<h3 class="text-2xl font-black text-white font-serif">呪紋弾幕 の遊び方</h3>
+					<p class="text-xs text-zinc-500 mt-1">ゲームの基本ルールと操作方法</p>
+				</div>
+
+				<div class="space-y-5 text-sm text-zinc-300 leading-relaxed">
+					<!-- Step 1 -->
+					<div class="space-y-1">
+						<h4 class="font-extrabold text-white flex items-center gap-2">
+							<span class="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-mono">1</span>
+							自機の操作 (移動)
+						</h4>
+						<p class="pl-7 text-xs text-zinc-400">
+							<strong class="text-white">PC:</strong> <code class="bg-zinc-900 px-1.5 py-0.5 rounded text-white border border-white/5">W A S D</code> キー または <code class="bg-zinc-900 px-1.5 py-0.5 rounded text-white border border-white/5">矢印</code> キーで移動します。<code class="bg-zinc-900 px-1.5 py-0.5 rounded text-white border border-white/5">Shift</code> キーを長押しすると、移動速度がゆっくり（フォーカスモード）になり、赤い被弾判定（ヒットボックス）が可視化されます。<br />
+							<strong class="text-white">タブレット:</strong> 左側の <strong class="text-cyan-400">弾幕ゾーン</strong> 内をドラッグすることで、指の動きに合わせて自機を直感的に動かすことができます。
+						</p>
+					</div>
+
+					<!-- Step 2 -->
+					<div class="space-y-1">
+						<h4 class="font-extrabold text-white flex items-center gap-2">
+							<span class="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-mono">2</span>
+							呪文の詠唱 (模様を描く)
+						</h4>
+						<p class="pl-7 text-xs text-zinc-400">
+							右側の <strong class="text-emerald-400">呪文唱えゾーン</strong> 内をドラッグ（マウスドラッグまたは画面のタッチ）して、呪文のお手本に沿った模様を描きます。
+							お手本の模様を描き終えて指やクリックを離すと、自動的に図形が認識されます。
+						</p>
+					</div>
+
+					<!-- Step 3 -->
+					<div class="space-y-1">
+						<h4 class="font-extrabold text-white flex items-center gap-2">
+							<span class="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-mono">3</span>
+							図形の一致度とダメージ倍率
+						</h4>
+						<p class="pl-7 text-xs text-zinc-400">
+							描いた模様がお手本に似ているほど、呪文の威力（ダメージ）がアップします！完璧に描けると <strong class="text-emerald-400 font-bold">PERFECT(2倍ダメージ)</strong> となり、大きなエネルギーが放たれます。
+							お手本とあまりにかけ離れていると詠唱失敗となり弾が出ないので、落ち着いて丁寧に進めましょう。
+						</p>
+					</div>
+
+					<!-- Step 4 -->
+					<div class="space-y-1">
+						<h4 class="font-extrabold text-white flex items-center gap-2">
+							<span class="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-mono">4</span>
+							グレイズ (かすり) システム
+						</h4>
+						<p class="pl-7 text-xs text-zinc-400">
+							敵の弾にギリギリまで近づく（かすり判定）と <strong class="text-white">"GRAZE!"</strong> というエフェクトとともにスコアが大幅に上昇します。危険ですがハイスコアを狙うための強力な手段です。
+						</p>
+					</div>
+
+					<!-- Step 5 -->
+					<div class="space-y-1">
+						<h4 class="font-extrabold text-white flex items-center gap-2">
+							<span class="w-5 h-5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-mono">5</span>
+							ステージサイクルと魔導ショップ
+						</h4>
+						<p class="pl-7 text-xs text-zinc-400">
+							敵のHPを削りきるとステージクリアとなり、獲得スコアに応じたゴールドがもらえます。クリア後は <strong class="text-yellow-400">魔導書ショップ</strong> で不要な呪文を売却（購入額の半値）したり、新たな高威力呪文（全10種類）を購入してデッキを強化できます。
 						</p>
 					</div>
 				</div>
 
-				<!-- 右側: マップ (エコール・いずみの場所を示すおしゃれな地図やiframe) -->
-				<div class="h-full min-h-[400px] bg-glass rounded-3xl overflow-hidden border border-white/10 relative">
-					<!-- Google Map iframe (エコール・いずみ) -->
-					<iframe 
-						title="INNOVATION PARK OSAKA IZUMI Map"
-						src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3289.475459345229!2d135.42436157640476!3d34.46545199587425!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x6000db4be747db5d%3A0xe5e1281fa0c201df!2z44Ko44Kz44O844Or44O744GE44Ga44G_!5e0!3m2!1sja!2sjp!4v1718000000000!5m2!1sja!2sjp" 
-						class="w-full h-full min-h-[400px] border-0 opacity-80 contrast-125 filter grayscale invert"
-						allowfullscreen="" 
-						loading="lazy" 
-						referrerpolicy="no-referrer-when-downgrade"
-					></iframe>
+				<div class="pt-4 border-t border-white/10 flex justify-end">
+					<button 
+						on:click={() => { showTutorial = false; }}
+						class="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold rounded-xl text-xs"
+					>
+						理解しました
+					</button>
 				</div>
 			</div>
 		</div>
-	</section>
+	{/if}
+</main>
 
-	<!-- フッター -->
-	<footer class="bg-[#050505] text-white/40 text-xs py-12 px-6 border-t border-white/5">
-		<div class="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-			<div>
-				<p class="font-bold text-white/60 mb-2">INNOVATION PARK OSAKA IZUMI</p>
-				<p>© 2026 INNOVATION PARK OSAKA IZUMI 非公式ファンサイト. All Rights Reserved.</p>
-				<p class="text-[10px] text-white/30 mt-1">※本サイトは非公式に作成されたファンメイドのデモページであり、公式サイトではありません。</p>
-			</div>
-			<div class="flex gap-6 text-white/60">
-				<a href="https://izumi.innovation-park.jp/" target="_blank" rel="noopener noreferrer" class="hover:text-neon transition-colors">
-					公式サイトはこちら →
-				</a>
-			</div>
-		</div>
-	</footer>
-</div>
+<style>
+	/* Custom styles and overrides */
+	.hover\:scale-103:hover {
+		transform: scale(1.03);
+	}
+	.active\:scale-98:active {
+		transform: scale(0.98);
+	}
+	.bg-emerald-950-10 {
+		background-color: rgba(6, 95, 70, 0.1);
+	}
+	.border-emerald-500-20 {
+		border-color: rgba(16, 185, 129, 0.2);
+	}
+	.hover\:scale-102:hover {
+		transform: scale(1.02);
+	}
+</style>
